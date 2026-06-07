@@ -1,5 +1,95 @@
 # AetherV
+
 A version-aware, incrementally maintained vector database that treats knowledge as a continuously evolving graph rather than a static collection of embeddings.
+
+---
+
+## Current Implementation (`aetherv/`)
+
+The `aetherv` Python package is the first working slice of the engine: a segmented, on-disk vector database with GPU-accelerated similarity search. It is installable from the repo root via `pyproject.toml` (Hatchling build, Python ≥ 3.11).
+
+### Dependencies
+
+| Library | Role |
+| --- | --- |
+| **fastembed** | Default text embedder (`TextEmbedding`); vectors are L2-normalized after encoding |
+| **jax** | JIT-compiled dot-product search on GPU (or CPU fallback) per segment |
+| **numpy** | Array interchange between embedder, storage, and search |
+| **polars** | Columnar metadata store (`id`, `text`, `segment`, `row`) backed by Parquet |
+| **pyarrow** | Arrow IPC read/write for fixed-size embedding vectors on disk |
+
+Dev extras: `pytest`.
+
+### Package layout
+
+```
+aetherv/
+├── __init__.py          # Public API: Config, VectorDB, SearchResult, SegmentRecord
+├── config.py            # Runtime paths and segment sizing
+├── db.py                # VectorDB — insert, query, segment lifecycle
+├── embedder.py          # Embedder protocol + FastEmbedder
+├── segments.py          # Segment file path resolution
+├── types.py             # SearchResult, SegmentRecord dataclasses
+├── search/
+│   └── gpu.py           # SegmentSearcher — JAX @jit score + top-k
+└── storage/
+    ├── arrow.py         # ArrowSegment — IPC write/read for embedding matrices
+    ├── manifest.py      # JSON manifest of segment records
+    └── metadata.py      # Polars Parquet store with O(1) (segment, row) lookup
+```
+
+### On-disk layout
+
+Opening a `VectorDB` at `root` (default `vectordb/`) produces:
+
+```
+vectordb/
+├── metadata.parquet     # id, text, segment, row — Polars
+├── manifest.json        # segment index (id, name, vector_count, created_at)
+└── segments/
+    ├── segment_000000.arrow
+    ├── segment_000001.arrow
+    └── ...
+```
+
+Each `.arrow` file is an Arrow IPC stream of `FixedSizeList<float32>` embeddings for one segment (default up to 10,000 vectors per segment, configurable via `Config.segment_size`).
+
+### How it works
+
+**Insert** — `VectorDB.insert(ids, texts)` embeds all texts through the configured embedder (default `FastEmbedder`), batches vectors into segments, writes each batch as an Arrow IPC file, appends rows to the Polars metadata table, and registers a `SegmentSearcher` for the new segment.
+
+**Query** — `VectorDB.query(text, k)` embeds the query, runs parallel top-k search across every loaded segment (`ThreadPoolExecutor`), merges candidates by score, and resolves `(segment_id, row)` pairs back to `(id, text)` via the metadata lookup.
+
+**Search kernel** — Because embeddings are normalized, a dot product equals cosine similarity. `SegmentSearcher` uploads a segment matrix to the JAX device once, then uses a `@jax.jit` matvec for scoring and `numpy.argpartition` for top-k within each segment.
+
+**Pluggability** — `Embedder` is a `Protocol`; tests inject a deterministic hash-based embedder to avoid model downloads. `Config` controls root path, segment size, and filenames.
+
+### Install and usage
+
+```bash
+pip install -e ".[dev]"   # from repo root
+pytest
+```
+
+```python
+from aetherv import Config, VectorDB
+
+db = VectorDB("vectordb", config=Config(segment_size=10_000))
+db.insert(
+    ids=[1, 2, 3],
+    texts=["JAX accelerates search", "Polars stores metadata", "Arrow holds vectors"],
+)
+
+for hit in db.query("dataframe library", k=2):
+    print(hit.score, hit.id, hit.text)
+```
+
+### Tests
+
+`tests/test_vectordb.py` covers insert/query, O(1) metadata lookup, legacy manifest loading, and empty inserts using a `DeterministicEmbedder` (no network or model download).
+
+---
+
 # Project AetherV Evolution Engine (AEE)
 
 ## Vision
