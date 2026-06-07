@@ -1,0 +1,6 @@
+vectordb/
+experiments/
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
